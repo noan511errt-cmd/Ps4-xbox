@@ -18,9 +18,13 @@ jobs:
   build-ps4:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
@@ -33,21 +37,28 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           if [ ! -f CMakeLists.txt ]; then
             archive="$(find . -maxdepth 2 -type f -name 'Nawaf-Cloud-Gaming-PS4-*.zip' -print -quit)"
+
             if [ -z "$archive" ]; then
-              echo "::error::CMakeLists.txt is missing and no Nawaf source ZIP was uploaded."
+              echo "::error::CMakeLists.txt is missing and no source ZIP was uploaded."
               exit 1
             fi
+
             mkdir -p _source
             unzip -q "$archive" -d _source
+
             project_root="$(find _source -type f -name CMakeLists.txt -print -quit | xargs -r dirname)"
+
             if [ -z "$project_root" ]; then
-              echo "::error::The uploaded ZIP does not contain the project CMakeLists.txt."
+              echo "::error::ZIP does not contain CMakeLists.txt."
               exit 1
             fi
+
             cp -a "$project_root"/. .
           fi
+
           test -f CMakeLists.txt
           test -f tools/ps4/package.sh
           test -f cmake/ps4.toolchain.cmake
@@ -57,12 +68,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           version="$(sed -n 's/^project(xcloud_ps5 VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
-          [ -n "$version" ] || { echo "::error::Could not read project version"; exit 1; }
+
+          [ -n "$version" ] || {
+            echo "::error::Could not read project version"
+            exit 1
+          }
+
           echo "value=$version" >> "$GITHUB_OUTPUT"
           echo "Project version: $version"
+
           if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::Release tag $GITHUB_REF_NAME must match project version v$version"
+            echo "::error::Release tag must match project version v$version"
             exit 1
           fi
 
@@ -70,30 +88,51 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          if [ ! -f deps/mbedtls/CMakeLists.txt ]; then
+
+          mkdir -p deps
+
+          if [ ! -d deps/mbedtls/.git ]; then
             rm -rf deps/mbedtls
-            git clone --depth 1 https://github.com/Mbed-TLS/mbedtls.git deps/mbedtls
+            git clone --depth 1 --recurse-submodules --shallow-submodules \
+              https://github.com/Mbed-TLS/mbedtls.git deps/mbedtls
+          else
+            git -C deps/mbedtls submodule update --init --recursive
           fi
-          if [ ! -f deps/libdatachannel/CMakeLists.txt ]; then
+
+          if [ ! -d deps/libdatachannel/.git ]; then
             rm -rf deps/libdatachannel
-            git clone --depth 1 --recurse-submodules https://github.com/paullouisageneau/libdatachannel.git deps/libdatachannel
+            git clone --depth 1 --recurse-submodules --shallow-submodules \
+              https://github.com/paullouisageneau/libdatachannel.git deps/libdatachannel
+          else
+            git -C deps/libdatachannel submodule update --init --recursive
           fi
-          if [ ! -f deps/ffmpeg/configure ]; then
+
+          if [ ! -d deps/ffmpeg/.git ]; then
             rm -rf deps/ffmpeg
-            git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git deps/ffmpeg
+            git clone --depth 1 \
+              https://github.com/FFmpeg/FFmpeg.git deps/ffmpeg
           fi
+
+          echo "Checking dependency files..."
+
           test -f deps/mbedtls/CMakeLists.txt
+          test -f deps/mbedtls/framework/CMakeLists.txt
           test -f deps/libdatachannel/CMakeLists.txt
           test -f deps/libdatachannel/deps/libjuice/CMakeLists.txt
           test -f deps/ffmpeg/configure
+
+          echo "All dependencies are ready."
 
       - name: Install OpenOrbis PS4 toolchain
         shell: bash
         run: |
           set -euxo pipefail
+
           bash tools/ps4/fetch-toolchain.sh "$GITHUB_WORKSPACE/ps4-toolchain" 18
+
           test -f ps4-toolchain/link.x
           test -f ps4-toolchain/lib/crt1.o
+
           echo "$GITHUB_WORKSPACE/ps4-toolchain/bin/linux" >> "$GITHUB_PATH"
           echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/ps4-toolchain" >> "$GITHUB_ENV"
 
@@ -105,7 +144,8 @@ jobs:
             -DOO_PS4_TOOLCHAIN="$GITHUB_WORKSPACE/ps4-toolchain"
 
       - name: Compile
-        run: cmake --build build-ps4 --parallel 2
+        run: |
+          cmake --build build-ps4 --parallel 2
 
       - name: Create and verify PKG
         env:
@@ -113,11 +153,18 @@ jobs:
           XC_PS4_TITLE_ID: PSBX00001
         run: |
           set -euxo pipefail
+
           version="${{ steps.version.outputs.value }}"
-          XC_PS4_VERSION="$version" bash tools/ps4/package.sh build-ps4 build-ps4/pkg
+
+          XC_PS4_VERSION="$version" \
+            bash tools/ps4/package.sh build-ps4 build-ps4/pkg
+
           pkg="build-ps4/pkg/Nawaf Cloud Gaming - PS4.pkg"
+
           test -s "$pkg"
+
           sha256sum "$pkg" > build-ps4/pkg/SHA256SUMS.txt
+
           file "$pkg"
           ls -lh "$pkg"
 
@@ -131,18 +178,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach PKG to GitHub Release for version tags
+      - name: Attach PKG to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
+
           tag="$GITHUB_REF_NAME"
+
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "Nawaf Cloud Gaming $tag" \
-              --notes "Automated PS4 PKG build. Check the Actions run before installing."
+            gh release create "$tag" \
+              --title "Nawaf Cloud Gaming $tag" \
+              --notes "Automated PS4 PKG build."
+
           gh release upload "$tag" \
             "build-ps4/pkg/Nawaf Cloud Gaming - PS4.pkg" \
             "build-ps4/pkg/SHA256SUMS.txt" \
-            --clobber --repo "$GITHUB_REPOSITORY"
-            
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
