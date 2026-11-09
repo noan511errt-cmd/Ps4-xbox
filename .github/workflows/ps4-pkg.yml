@@ -1,3 +1,4 @@
+
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: Nawaf Cloud Gaming - PS4 PKG
 
@@ -30,29 +31,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake ninja-build clang-18 lld-18 llvm-18 \
-            python3 curl wget git nasm pkg-config libssl-dev zlib1g-dev unzip
+            build-essential cmake ninja-build \
+            clang-18 lld-18 llvm-18 \
+            python3 python3-pip curl wget git \
+            nasm pkg-config libssl-dev \
+            zlib1g-dev unzip file
 
       - name: Restore source from ZIP if needed
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           if [ ! -f CMakeLists.txt ]; then
-            archive="$(find . -maxdepth 2 -type f -name 'Nawaf-Cloud-Gaming-PS4-*.zip' -print -quit)"
+            archive="$(find . -maxdepth 2 -type f \
+              -name 'Nawaf-Cloud-Gaming-PS4-*.zip' \
+              -print -quit)"
 
             if [ -z "$archive" ]; then
-              echo "::error::CMakeLists.txt is missing and no source ZIP was uploaded."
+              echo "::error::Project source ZIP is missing"
               exit 1
             fi
 
             mkdir -p _source
             unzip -q "$archive" -d _source
 
-            project_root="$(find _source -type f -name CMakeLists.txt -print -quit | xargs -r dirname)"
+            project_root="$(find _source -type f \
+              -name CMakeLists.txt -print -quit | xargs -r dirname)"
 
             if [ -z "$project_root" ]; then
-              echo "::error::ZIP does not contain CMakeLists.txt."
+              echo "::error::CMakeLists.txt not found in ZIP"
               exit 1
             fi
 
@@ -69,18 +76,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="$(sed -n 's/^project(xcloud_ps5 VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          version="$(sed -n \
+            's/^project(xcloud_ps5 VERSION \([0-9.]*\).*/\1/p' \
+            CMakeLists.txt)"
 
-          [ -n "$version" ] || {
+          if [ -z "$version" ]; then
             echo "::error::Could not read project version"
             exit 1
-          }
+          fi
 
           echo "value=$version" >> "$GITHUB_OUTPUT"
           echo "Project version: $version"
 
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::Release tag must match project version v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* ]] &&
+             [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Release tag must match v$version"
             exit 1
           fi
 
@@ -91,29 +101,43 @@ jobs:
 
           mkdir -p deps
 
-          if [ ! -d deps/mbedtls/.git ]; then
+          if [ ! -f deps/mbedtls/CMakeLists.txt ]; then
             rm -rf deps/mbedtls
-            git clone --depth 1 --recurse-submodules --shallow-submodules \
-              https://github.com/Mbed-TLS/mbedtls.git deps/mbedtls
-          else
-            git -C deps/mbedtls submodule update --init --recursive
+            git clone \
+              --depth 1 \
+              --branch v3.6.2 \
+              --recurse-submodules \
+              https://github.com/Mbed-TLS/mbedtls.git \
+              deps/mbedtls
           fi
 
-          if [ ! -d deps/libdatachannel/.git ]; then
+          if [ -d deps/mbedtls/.git ]; then
+            git -C deps/mbedtls submodule sync --recursive
+            git -C deps/mbedtls submodule update \
+              --init --recursive
+          fi
+
+          if [ ! -f deps/libdatachannel/CMakeLists.txt ]; then
             rm -rf deps/libdatachannel
-            git clone --depth 1 --recurse-submodules --shallow-submodules \
-              https://github.com/paullouisageneau/libdatachannel.git deps/libdatachannel
-          else
-            git -C deps/libdatachannel submodule update --init --recursive
+            git clone \
+              --depth 1 \
+              --recurse-submodules \
+              https://github.com/paullouisageneau/libdatachannel.git \
+              deps/libdatachannel
           fi
 
-          if [ ! -d deps/ffmpeg/.git ]; then
+          if [ -d deps/libdatachannel/.git ]; then
+            git -C deps/libdatachannel submodule sync --recursive
+            git -C deps/libdatachannel submodule update \
+              --init --recursive
+          fi
+
+          if [ ! -f deps/ffmpeg/configure ]; then
             rm -rf deps/ffmpeg
             git clone --depth 1 \
-              https://github.com/FFmpeg/FFmpeg.git deps/ffmpeg
+              https://github.com/FFmpeg/FFmpeg.git \
+              deps/ffmpeg
           fi
-
-          echo "Checking dependency files..."
 
           test -f deps/mbedtls/CMakeLists.txt
           test -f deps/mbedtls/framework/CMakeLists.txt
@@ -121,33 +145,61 @@ jobs:
           test -f deps/libdatachannel/deps/libjuice/CMakeLists.txt
           test -f deps/ffmpeg/configure
 
-          echo "All dependencies are ready."
-
       - name: Install OpenOrbis PS4 toolchain
         shell: bash
         run: |
           set -euxo pipefail
 
-          bash tools/ps4/fetch-toolchain.sh "$GITHUB_WORKSPACE/ps4-toolchain" 18
+          bash tools/ps4/fetch-toolchain.sh \
+            "$GITHUB_WORKSPACE/ps4-toolchain" 18
 
           test -f ps4-toolchain/link.x
           test -f ps4-toolchain/lib/crt1.o
 
-          echo "$GITHUB_WORKSPACE/ps4-toolchain/bin/linux" >> "$GITHUB_PATH"
-          echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/ps4-toolchain" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/ps4-toolchain/bin/linux" \
+            >> "$GITHUB_PATH"
+
+          echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/ps4-toolchain" \
+            >> "$GITHUB_ENV"
+
+      - name: Verify PS4 dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Checking project files..."
+
+          test -f CMakeLists.txt
+          test -f cmake/ps4.toolchain.cmake
+          test -f tools/ps4/package.sh
+          test -f ps4-toolchain/link.x
+
+          echo "Checking dependency directories..."
+
+          test -f deps/mbedtls/framework/CMakeLists.txt
+          test -f deps/libdatachannel/CMakeLists.txt
+          test -f deps/ffmpeg/configure
+
+          echo "All required files are present."
 
       - name: Configure optimized PS4 build
+        shell: bash
         run: |
+          set -euxo pipefail
+
           cmake -S . -B build-ps4 -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=cmake/ps4.toolchain.cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DOO_PS4_TOOLCHAIN="$GITHUB_WORKSPACE/ps4-toolchain"
 
       - name: Compile
+        shell: bash
         run: |
+          set -euxo pipefail
           cmake --build build-ps4 --parallel 2
 
       - name: Create and verify PKG
+        shell: bash
         env:
           XC_PS4_TITLE: Nawaf Cloud Gaming
           XC_PS4_TITLE_ID: PSBX00001
@@ -157,13 +209,15 @@ jobs:
           version="${{ steps.version.outputs.value }}"
 
           XC_PS4_VERSION="$version" \
-            bash tools/ps4/package.sh build-ps4 build-ps4/pkg
+            bash tools/ps4/package.sh \
+            build-ps4 build-ps4/pkg
 
           pkg="build-ps4/pkg/Nawaf Cloud Gaming - PS4.pkg"
 
           test -s "$pkg"
 
-          sha256sum "$pkg" > build-ps4/pkg/SHA256SUMS.txt
+          sha256sum "$pkg" \
+            > build-ps4/pkg/SHA256SUMS.txt
 
           file "$pkg"
           ls -lh "$pkg"
@@ -187,10 +241,11 @@ jobs:
 
           tag="$GITHUB_REF_NAME"
 
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" \
-              --title "Nawaf Cloud Gaming $tag" \
-              --notes "Automated PS4 PKG build."
+          gh release view "$tag" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+          gh release create "$tag" \
+            --title "Nawaf Cloud Gaming $tag" \
+            --notes "Automated PS4 PKG build."
 
           gh release upload "$tag" \
             "build-ps4/pkg/Nawaf Cloud Gaming - PS4.pkg" \
